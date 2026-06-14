@@ -38,9 +38,15 @@ A Node.js Telegram bot that generates funny jokes, random facts, and playful roa
 # Copy the example file
 cp .env.example .env
 
-# Edit .env and add your credentials
+# Edit .env and add your credentials. You can provide up to three Gemini and
+# three Groq keys; the bot will try them in order as fallbacks.
 # TELEGRAM_TOKEN=your_bot_token_here
-# GEMINI_API_KEY=your_gemini_key_here
+# GEMINI_API_KEY1=your_gemini_key_1
+# GEMINI_API_KEY2=your_gemini_key_2  # optional
+# GEMINI_API_KEY3=your_gemini_key_3  # optional
+# GROQ_API_KEY1=your_groq_key_1
+# GROQ_API_KEY2=your_groq_key_2      # optional
+# GROQ_API_KEY3=your_groq_key_3      # optional
 ```
 
 ### 4. Install Dependencies
@@ -102,7 +108,7 @@ gcloud run deploy telegram-funny-bot \
   --source . \
   --platform managed \
   --region us-central1 \
-  --set-env-vars TELEGRAM_TOKEN=xxx,GEMINI_API_KEY=xxx
+  --set-env-vars TELEGRAM_TOKEN=xxx,GEMINI_API_KEY1=xxx
 ```
 
 ### Option C: Keep Running Locally (VPS/Server)
@@ -137,7 +143,12 @@ docker run -e TELEGRAM_TOKEN=xxx -e GEMINI_API_KEY=xxx telegram-funny-bot
 | Variable | Description |
 |----------|-------------|
 | `TELEGRAM_TOKEN` | Your Telegram bot token from BotFather |
-| `GEMINI_API_KEY` | Your Google Gemini API key |
+| `GEMINI_API_KEY1` | Primary Google Gemini API key (bot tries GEMINI_API_KEY2/3 as fallbacks) |
+| `GEMINI_API_KEY2` | Secondary Gemini API key (optional) |
+| `GEMINI_API_KEY3` | Tertiary Gemini API key (optional) |
+| `GROQ_API_KEY1` | Primary Groq API key (used as fallback when Gemini fails; bot tries GROQ_API_KEY2/3) |
+| `GROQ_API_KEY2` | Secondary Groq API key (optional) |
+| `GROQ_API_KEY3` | Tertiary Groq API key (optional) |
 
 ## 🐛 Troubleshooting
 
