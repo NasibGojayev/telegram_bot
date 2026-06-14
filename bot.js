@@ -8,19 +8,28 @@ const fs = require('fs');
 const token = process.env.TELEGRAM_TOKEN;
 const bot = new TelegramBot(token, { polling: true });
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+const GEMINI_API_KEYS = [
+  process.env.GEMINI_API_KEY1,
+  process.env.GEMINI_API_KEY2,
+  process.env.GEMINI_API_KEY3,
+].filter(Boolean);
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-let groqClient;
-if (GROQ_API_KEY) {
-  groqClient = new OpenAI({
-    apiKey: GROQ_API_KEY,
-    baseURL: 'https://api.groq.com/openai/v1',
-  });
-} else {
-  console.warn('Warning: GROQ_API_KEY is not set. Groq fallback will be disabled.');
+function createGeminiClient(key) {
+  return new GoogleGenAI({ apiKey: key });
 }
+
+const GROQ_API_KEYS = [
+  process.env.GROQ_API_KEY1,
+  process.env.GROQ_API_KEY2,
+  process.env.GROQ_API_KEY3,
+].filter(Boolean);
+
+function createGroqClient(key) {
+  return new OpenAI({ apiKey: key, baseURL: 'https://api.groq.com/openai/v1' });
+}
+
+if (!GEMINI_API_KEYS.length) console.warn('Warning: No GEMINI_API_KEYs configured.');
+if (!GROQ_API_KEYS.length) console.warn('Warning: No GROQ_API_KEYs configured. Groq fallback will be disabled.');
 
 let botUsername = process.env.BOT_USERNAME ? process.env.BOT_USERNAME.toLowerCase() : null;
 const PRIMARY_USERNAMES = process.env.PRIMARY_USERNAMES
@@ -102,55 +111,66 @@ function saveChattySettings() {
 
 // Helper function to call Groq fallback API
 async function callGroq(prompt) {
-  if (!GROQ_API_KEY) {
-    console.error('Groq fallback requested but GROQ_API_KEY is not configured.');
-    return '❌ Oops! The fallback service is not configured. Please set GROQ_API_KEY.';
+  if (!GROQ_API_KEYS.length) {
+    console.error('Groq fallback requested but no GROQ_API_KEYs are configured.');
+    return '❌ Oops! The fallback service is not configured. Please set GROQ_API_KEYs.';
   }
 
-  try {
-    const response = await groqClient.responses.create({
-      model: 'openai/gpt-oss-20b',
-      input: prompt,
-    });
+  for (let i = 0; i < GROQ_API_KEYS.length; i++) {
+    const key = GROQ_API_KEYS[i];
+    const client = createGroqClient(key);
+    try {
+      const response = await client.responses.create({ model: 'openai/gpt-oss-20b', input: prompt });
 
-    return (
-      response.output_text ||
-      (Array.isArray(response.output)
-        ? response.output
-            .map((output) =>
-              Array.isArray(output.content)
-                ? output.content.map((item) => item?.text || '').join('')
-                : ''
-            )
-            .join(' ')
-        : '') ||
-      '❌ Oops! Groq is taking a nap. Try again later!'
-    );
-  } catch (error) {
-    console.error('Groq API Error:', error.response?.data || error.message);
-    return '❌ Oops! Groq is taking a nap. Try again later!';
+      const text =
+        response.output_text ||
+        (Array.isArray(response.output)
+          ? response.output
+              .map((output) =>
+                Array.isArray(output.content)
+                  ? output.content.map((item) => item?.text || '').join('')
+                  : ''
+              )
+              .join(' ')
+          : '');
+
+      if (text && text.trim()) return text;
+
+      console.warn(`Groq key #${i + 1} returned no text, trying next key.`);
+    } catch (error) {
+      console.error(`Groq API Error with key #${i + 1}:`, error.response?.data || error.message);
+      // try next key
+    }
   }
+
+  return '❌ Oops! Groq is taking a nap. Try again later!';
 }
 
 // Helper function to call Gemini API
 async function callGemini(prompt) {
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: prompt,
-    });
-
-    const text = response.text || response.output?.[0]?.content?.[0]?.text || '';
-    if (text && text.trim()) {
-      return text;
-    }
-
-    console.warn('Gemini returned no usable text, falling back to Groq.');
-    return await callGroq(prompt);
-  } catch (error) {
-    console.error('Gemini API Error:', error.response?.data || error.message);
+  if (!GEMINI_API_KEYS.length) {
+    console.warn('No Gemini API keys configured; falling back to Groq.');
     return await callGroq(prompt);
   }
+
+  for (let i = 0; i < GEMINI_API_KEYS.length; i++) {
+    const key = GEMINI_API_KEYS[i];
+    const client = createGeminiClient(key);
+    try {
+      const response = await client.models.generateContent({ model: 'gemini-3.5-flash', contents: prompt });
+
+      const text = response.text || response.output?.[0]?.content?.[0]?.text || '';
+      if (text && text.trim()) return text;
+
+      console.warn(`Gemini key #${i + 1} returned no usable text, trying next key.`);
+    } catch (error) {
+      console.error(`Gemini API Error with key #${i + 1}:`, error.response?.data || error.message);
+      // try next key
+    }
+  }
+
+  console.warn('All Gemini keys exhausted or failed, falling back to Groq.');
+  return await callGroq(prompt);
 }
 
 const groupProfiles = [
@@ -522,6 +542,19 @@ bot.onText(/\/mock/, async (msg) => {
 // Error handler
 bot.on('polling_error', (error) => {
   console.error('Polling Error:', error);
+
+  // If another instance is using getUpdates, Telegram returns 409 Conflict.
+  // Exit so a process manager (pm2, systemd, Docker) can restart the correct instance
+  // after you stop the duplicate. This prevents noisy repeated errors.
+  try {
+    const description = error?.response?.body?.description || '';
+    if (error && error.code === 'ETELEGRAM' && description.includes('terminated by other getUpdates')) {
+      console.error('Detected Telegram 409 conflict (another getUpdates instance). Exiting.');
+      process.exit(1);
+    }
+  } catch (e) {
+    // ignore and continue
+  }
 });
 
 console.log('✅ Bot is running and listening for commands...');
