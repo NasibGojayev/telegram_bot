@@ -8,10 +8,10 @@ const fs = require('fs');
 // ========================
 // CONFIGURATION (tune these)
 // ========================
-const GROUP_COOLDOWN_MS = 60 * 1000;          // 60 seconds per group
-const USER_COOLDOWN_MS = 3 * 60 * 1000;       // 3 minutes per user
-const RESPONSE_PROBABILITY = 0.10;            // 10% chance to reply when eligible
-const BATCH_WINDOW_MS = 30 * 1000;            // 30 seconds batch window in groups
+const GROUP_COOLDOWN_MS = 15 * 1000;          // 15 seconds per group
+const USER_COOLDOWN_MS = 20 * 1000;           // 20 seconds per user
+const RESPONSE_PROBABILITY = 0.80;            // 80% chance to reply when eligible
+const BATCH_WINDOW_MS = 15 * 1000;            // 15 seconds batch window in groups
 const CACHE_TTL_MS = 5 * 60 * 1000;           // 5 minutes cache TTL
 const QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours for exhausted keys
 const JOKES_FILE = './jokes.json';
@@ -21,6 +21,7 @@ const FACTS_FILE = './facts.json';
 // HEALTH SERVER (unchanged)
 // ========================
 const app = express();
+app.use(express.json());
 app.get('/', (req, res) => res.send('Telegram bot is running'));
 app.get('/heartbeat', (req, res) => res.status(200).send('OK'));
 const PORT = process.env.PORT || 10000;
@@ -30,7 +31,54 @@ app.listen(PORT, () => console.log(`Health server listening on port ${PORT}`));
 // BOT INITIALIZATION
 // ========================
 const token = process.env.TELEGRAM_TOKEN;
-const bot = new TelegramBot(token, { polling: true });
+const rawWebhookPath = process.env.WEBHOOK_PATH;
+const rawWebhookUrl = process.env.WEBHOOK_URL;
+const WEBHOOK_HOST = process.env.WEBHOOK_HOST;
+
+let WEBHOOK_ROUTE = rawWebhookPath || `/webhook/${token}`;
+let WEBHOOK_URL = rawWebhookUrl || null;
+
+try {
+  if (WEBHOOK_ROUTE && WEBHOOK_ROUTE.match(/^https?:\/\//i)) {
+    const url = new URL(WEBHOOK_ROUTE);
+    WEBHOOK_URL = WEBHOOK_URL || WEBHOOK_ROUTE;
+    WEBHOOK_ROUTE = url.pathname + (url.search || '');
+  }
+} catch (err) {
+  console.warn('Invalid WEBHOOK_PATH URL format; using as route:', WEBHOOK_ROUTE);
+}
+
+if (!WEBHOOK_URL && WEBHOOK_HOST) {
+  const host = WEBHOOK_HOST.replace(/\/+$/, '');
+  WEBHOOK_ROUTE = WEBHOOK_ROUTE.startsWith('/') ? WEBHOOK_ROUTE : `/${WEBHOOK_ROUTE}`;
+  WEBHOOK_URL = `${host}${WEBHOOK_ROUTE}`;
+}
+
+const bot = new TelegramBot(token);
+
+const maskToken = (value) => {
+  if (!value) return value;
+  return value.replace(/([A-Za-z0-9_-]{10})[A-Za-z0-9_-]+([A-Za-z0-9_-]{10})$/, '$1...$2');
+};
+
+if (WEBHOOK_URL) {
+  const webhookRoute = WEBHOOK_ROUTE.startsWith('/') ? WEBHOOK_ROUTE : `/${WEBHOOK_ROUTE}`;
+  app.post(webhookRoute, (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+  });
+
+  bot
+    .setWebHook(WEBHOOK_URL)
+    .then(() => {
+      console.log(`✅ Telegram webhook is set.`);
+      console.log(`✅ /setwebhook resolved route: ${maskToken(webhookRoute)}`);
+      console.log(`✅ /setwebhook resolved URL: ${maskToken(WEBHOOK_URL)}`);
+    })
+    .catch((err) => console.error('Failed to set Telegram webhook:', err));
+} else {
+  console.warn('Warning: WEBHOOK_URL, WEBHOOK_HOST, or WEBHOOK_PATH is not configured. Telegram webhook is disabled.');
+}
 
 // ========================
 // API KEY MANAGEMENT
@@ -109,6 +157,7 @@ localJokes = loadLocalData(JOKES_FILE, [
 
 localFacts = loadLocalData(FACTS_FILE, [
   "Octopuses have three hearts.",
+  "The national animal of Canada is beaver",
   "Bananas are berries, but strawberries aren't.",
   "A day on Venus is longer than a year on Venus.",
   "Honey never spoils; archaeologists found 3,000-year-old honey in Egyptian tombs.",
@@ -395,14 +444,14 @@ function shouldReplyToMessage(msg) {
   if (chattySettings[msg.chat.id]) return true;
 
   const lower = text.toLowerCase();
-  const funnyKeywords = /(lol|lmao|haha|hehe|🤣|😂|funny|joke|roast|silly|wtf|bruh|hilarious|cute)/i;
+  const activeKeywords = /(lol|lmao|haha|hehe|🤣|😂|funny|joke|roast|silly|wtf|bruh|hilarious|cute|wow|nice|omg|cool|fire|what|help|tell me|say something|seriously|please|interesting|\?)/i;
   const mentionProfiles = getProfilesFromMessage(msg);
 
   if (mentionProfiles.length > 0) return true;
   if (messageMentionsBot(msg)) return true;
   if (msg.from?.username && PRIMARY_USERNAMES.includes(msg.from.username.toLowerCase())) return true;
-  if (funnyKeywords.test(lower)) return true;
-  if (text.length > 40 && Math.random() < RESPONSE_PROBABILITY) return true;
+  if (activeKeywords.test(lower)) return true;
+  if (text.length > 20 && Math.random() < RESPONSE_PROBABILITY) return true;
   return false;
 }
 
