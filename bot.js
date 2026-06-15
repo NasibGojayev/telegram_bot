@@ -107,6 +107,19 @@ class QuotaAwareKeyManager {
   }
 }
 
+const GEMINI_MODELS = [
+  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite'
+];
+const GROQ_MODEL_POOL = [
+  'llama-3.3-70b-versatile',
+  'qwen/qwen3-32b',
+  'openai/gpt-oss-120b',
+  'llama-3.1-8b-instant',
+  'openai/gpt-oss-20b'
+];
 const GEMINI_API_KEYS = [process.env.GEMINI_API_KEY1, process.env.GEMINI_API_KEY2, process.env.GEMINI_API_KEY3].filter(Boolean);
 const GROQ_API_KEYS = [process.env.GROQ_API_KEY1, process.env.GROQ_API_KEY2, process.env.GROQ_API_KEY3, process.env.GROQ_API_KEY4].filter(Boolean);
 const geminiManager = new QuotaAwareKeyManager(GEMINI_API_KEYS, 'Gemini');
@@ -237,31 +250,42 @@ async function callGroq(prompt) {
 
   for (const keyEntry of availableKeys) {
     const client = createGroqClient(keyEntry.key);
-    try {
-      const response = await client.chat.completions.create({ 
-        model: 'openai/gpt-oss-120b', 
-        messages: [{ role: 'user', content: prompt }]
-      });
-      const text = response.choices?.[0]?.message?.content || '';
-      if (text && text.trim()) {
-        incrementApiCalls();
-        return text.trim();
+    let isRateLimited = false;
+
+    for (const modelName of GROQ_MODEL_POOL) {
+      try {
+        const response = await client.chat.completions.create({
+          model: modelName,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        const text = response.choices?.[0]?.message?.content || '';
+        if (text && text.trim()) {
+          incrementApiCalls();
+          return text.trim();
+        }
+        console.warn(`[Groq] Key #${keyEntry.index + 1} model ${modelName} returned empty text.`);
+      } catch (error) {
+        const status = error?.status || error?.response?.status;
+        const errorData = error?.error || error?.response?.data?.error;
+        const message = error?.message || error?.response?.data?.error?.message || 'Unknown error';
+        console.warn(`[Groq] Key #${keyEntry.index + 1} model ${modelName} error [${status}]:`, message);
+        if (errorData) console.warn(`[Groq] Error details:`, JSON.stringify(errorData));
+
+        if (isQuotaError(error)) {
+          isRateLimited = true;
+          console.warn(`[Groq] Model ${modelName} hit rate limit. Trying next model...`);
+          continue;
+        }
+        break;
       }
-      console.warn(`[Groq] Key #${keyEntry.index + 1} returned empty text.`);
-    } catch (error) {
-      const status = error?.status || error?.response?.status;
-      const errorData = error?.error || error?.response?.data?.error;
-      const message = error?.message || error?.response?.data?.error?.message || 'Unknown error';
-      console.error(`[Groq] Key #${keyEntry.index + 1} error [${status}]:`, message);
-      if (errorData) console.error(`[Groq] Error details:`, JSON.stringify(errorData));
-      
-      if (isQuotaError(error)) {
-        groqManager.markUnavailable(keyEntry.key);
-      }
+    }
+
+    if (isRateLimited) {
+      groqManager.markUnavailable(keyEntry.key);
     }
   }
 
-  console.warn('All Groq keys failed, falling back to Gemini.');
+  console.warn('All Groq models failed. Falling back to Gemini.');
   return await callGemini(prompt);
 }
 
@@ -274,19 +298,31 @@ async function callGemini(prompt) {
 
   for (const keyEntry of availableKeys) {
     const client = createGeminiClient(keyEntry.key);
-    try {
-      const response = await client.models.generateContent({ model: 'gemini-3.5-flash', contents: prompt });
-      const text = response.text || response.output?.[0]?.content?.[0]?.text || '';
-      if (text && text.trim()) {
-        incrementApiCalls();
-        return text.trim();
+    let keyHasRateLimit = false;
+
+    for (const modelName of GEMINI_MODELS) {
+      try {
+        const response = await client.models.generateContent({ model: modelName, contents: prompt });
+        const text = response.text || response.output?.[0]?.content?.[0]?.text || '';
+        if (text && text.trim()) {
+          incrementApiCalls();
+          return text.trim();
+        }
+        console.warn(`[Gemini] Key #${keyEntry.index + 1} model ${modelName} returned empty text.`);
+      } catch (error) {
+        const isQuota = isQuotaError(error);
+        console.warn(`[Gemini] Key #${keyEntry.index + 1} model ${modelName} error:`, error?.message || error);
+        if (isQuota) {
+          keyHasRateLimit = true;
+          console.warn(`[Gemini] Key #${keyEntry.index + 1} model ${modelName} hit rate limit. Trying next model...`);
+          continue;
+        }
+        break;
       }
-      console.warn(`[Gemini] Key #${keyEntry.index + 1} returned empty text.`);
-    } catch (error) {
-      console.error(`[Gemini] Key #${keyEntry.index + 1} error:`, error?.message || error);
-      if (isQuotaError(error)) {
-        geminiManager.markUnavailable(keyEntry.key);
-      }
+    }
+
+    if (keyHasRateLimit) {
+      geminiManager.markUnavailable(keyEntry.key);
     }
   }
 
@@ -370,6 +406,10 @@ function saveChattySettings() {
   } catch (e) {
     console.error('Failed to save chatty settings', e);
   }
+}
+
+function isChattyGroup(chatId) {
+  return !!chattySettings[chatId];
 }
 
 const groupProfiles = [
@@ -519,6 +559,7 @@ async function processBatch(chatId) {
 
 function addToBatch(msg) {
   const chatId = msg.chat.id;
+  const delay = isChattyGroup(chatId) ? 0 : BATCH_WINDOW_MS;
   let buffer = groupBatchBuffers.get(chatId);
   if (!buffer) {
     buffer = { messages: [], timer: null };
@@ -526,7 +567,7 @@ function addToBatch(msg) {
   }
   buffer.messages.push(msg);
   if (buffer.timer) clearTimeout(buffer.timer);
-  buffer.timer = setTimeout(() => processBatch(chatId), BATCH_WINDOW_MS);
+  buffer.timer = setTimeout(() => processBatch(chatId), delay);
 }
 
 bot.on('message', async (msg) => {
@@ -537,24 +578,26 @@ bot.on('message', async (msg) => {
   const userId = msg.from.id;
   const now = Date.now();
 
+  const chattyGroup = isChattyGroup(chatId);
   const lastGroup = groupLastResponse.get(chatId) || 0;
-  if (now - lastGroup < GROUP_COOLDOWN_MS) {
+  if (!chattyGroup && now - lastGroup < GROUP_COOLDOWN_MS) {
     cooldownIgnores += 1;
     return;
   }
 
   const lastUser = userLastResponse.get(userId) || 0;
-  if (now - lastUser < USER_COOLDOWN_MS) {
+  if (!chattyGroup && now - lastUser < USER_COOLDOWN_MS) {
     cooldownIgnores += 1;
     return;
   }
 
-  if (Math.random() > RESPONSE_PROBABILITY) {
+  if (!chattyGroup && Math.random() > RESPONSE_PROBABILITY) {
     cooldownIgnores += 1;
     return;
   }
 
   const isDirectMention = messageMentionsBot(msg) || (msg.reply_to_message?.from?.username === botUsername);
+
   if (isDirectMention || msg.chat.type === 'private') {
     const cached = getCachedResponse(msg.text);
     if (cached) {
