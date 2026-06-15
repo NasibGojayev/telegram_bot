@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { GoogleGenAI } = require('@google/genai');
-const { OpenAI } = require('openai');
+const Groq = require('groq-sdk');
 const fs = require('fs');
 
 // ========================
@@ -108,7 +108,7 @@ class QuotaAwareKeyManager {
 }
 
 const GEMINI_API_KEYS = [process.env.GEMINI_API_KEY1, process.env.GEMINI_API_KEY2, process.env.GEMINI_API_KEY3].filter(Boolean);
-const GROQ_API_KEYS = [process.env.GROQ_API_KEY1, process.env.GROQ_API_KEY2, process.env.GROQ_API_KEY3].filter(Boolean);
+const GROQ_API_KEYS = [process.env.GROQ_API_KEY1, process.env.GROQ_API_KEY2, process.env.GROQ_API_KEY3, process.env.GROQ_API_KEY4].filter(Boolean);
 const geminiManager = new QuotaAwareKeyManager(GEMINI_API_KEYS, 'Gemini');
 const groqManager = new QuotaAwareKeyManager(GROQ_API_KEYS, 'Groq');
 
@@ -120,7 +120,7 @@ function createGeminiClient(key) {
 }
 
 function createGroqClient(key) {
-  return new OpenAI({ apiKey: key, baseURL: 'https://api.groq.com/openai/v1' });
+  return new Groq({ apiKey: key });
 }
 
 // ========================
@@ -238,18 +238,11 @@ async function callGroq(prompt) {
   for (const keyEntry of availableKeys) {
     const client = createGroqClient(keyEntry.key);
     try {
-      const response = await client.responses.create({ model: 'openai/gpt-oss-20b', input: prompt });
-      const text =
-        response.output_text ||
-        (Array.isArray(response.output)
-          ? response.output
-              .map((output) =>
-                Array.isArray(output.content)
-                  ? output.content.map((item) => item?.text || '').join('')
-                  : ''
-              )
-              .join(' ')
-          : '');
+      const response = await client.chat.completions.create({ 
+        model: 'openai/gpt-oss-120b', 
+        messages: [{ role: 'user', content: prompt }]
+      });
+      const text = response.choices?.[0]?.message?.content || '';
       if (text && text.trim()) {
         incrementApiCalls();
         return text.trim();
