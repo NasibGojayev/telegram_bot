@@ -249,7 +249,12 @@ async function callGroq(prompt) {
       }
       console.warn(`[Groq] Key #${keyEntry.index + 1} returned empty text.`);
     } catch (error) {
-      console.error(`[Groq] Key #${keyEntry.index + 1} error:`, error?.message || error);
+      const status = error?.status || error?.response?.status;
+      const errorData = error?.error || error?.response?.data?.error;
+      const message = error?.message || error?.response?.data?.error?.message || 'Unknown error';
+      console.error(`[Groq] Key #${keyEntry.index + 1} error [${status}]:`, message);
+      if (errorData) console.error(`[Groq] Error details:`, JSON.stringify(errorData));
+      
       if (isQuotaError(error)) {
         groqManager.markUnavailable(keyEntry.key);
       }
@@ -289,10 +294,10 @@ async function callGemini(prompt) {
 }
 
 async function callAI(prompt) {
-  if (GROQ_API_KEYS.length > 0) {
-    return await callGroq(prompt);
+  if (GEMINI_API_KEYS.length > 0) {
+    return await callGemini(prompt);
   }
-  return await callGemini(prompt);
+  return await callGroq(prompt);
 }
 
 // ========================
