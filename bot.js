@@ -331,9 +331,16 @@ async function callGemini(prompt) {
 
 async function callAI(prompt) {
   if (GEMINI_API_KEYS.length > 0) {
-    return await callGemini(prompt);
+    const geminiResponse = await callGemini(prompt);
+    if (!geminiResponse.startsWith('❌')) return geminiResponse;
+    console.warn('Gemini failed. Falling back to Groq.');
   }
-  return await callGroq(prompt);
+
+  if (GROQ_API_KEYS.length > 0) {
+    return await callGroq(prompt);
+  }
+
+  return '❌ Sorry, no AI keys are currently available. Please try again later.';
 }
 
 // ========================
