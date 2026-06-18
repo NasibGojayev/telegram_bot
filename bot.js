@@ -412,6 +412,34 @@ function isChattyGroup(chatId) {
   return !!chattySettings[chatId];
 }
 
+const ACTIVATED_GROUPS_FILE = './activated_groups.json';
+let activatedGroups = {};
+try {
+  if (fs.existsSync(ACTIVATED_GROUPS_FILE)) {
+    activatedGroups = JSON.parse(fs.readFileSync(ACTIVATED_GROUPS_FILE, 'utf8') || '{}');
+  }
+} catch (e) {
+  activatedGroups = {};
+}
+function saveActivatedGroups() {
+  try {
+    fs.writeFileSync(ACTIVATED_GROUPS_FILE, JSON.stringify(activatedGroups, null, 2));
+  } catch (e) {
+    console.error('Failed to save activated groups', e);
+  }
+}
+
+function isGroupActivated(chatId) {
+  return !!activatedGroups[chatId];
+}
+
+function isChatActivated(msg) {
+  if (msg.chat.type === 'private') return true;
+  return isGroupActivated(msg.chat.id);
+}
+
+const ACTIVATE_CODE = process.env.ACTIVATE_CODE || 'defaultsecretcode';
+
 const groupProfiles = [
   {
     patterns: [/\bPavi\b/i],
@@ -477,19 +505,27 @@ function shouldReplyToMessage(msg) {
   const text = msg.text.trim();
   if (!text || text.startsWith('/')) return false;
 
+  // 1. ALWAYS allow replies in private chat
   if (msg.chat.type === 'private') return true;
-  if (!['group', 'supergroup'].includes(msg.chat.type)) return false;
-  if (chattySettings[msg.chat.id]) return true;
 
+  // 2. Check if group is activated (if not private chat, group MUST be activated)
+  if (!isGroupActivated(msg.chat.id)) return false;
+
+  // 3. Check for explicit bot mention (This should always work if mentioned)
+  if (messageMentionsBot(msg)) return true;
+
+  // 4. ONLY proceed if the group has /chatty turned ON
+  if (!isChattyGroup(msg.chat.id)) return false;
+
+  // 5. If Chatty is ON, then check for other triggers
   const lower = text.toLowerCase();
   const activeKeywords = /(lol|lmao|haha|hehe|🤣|😂|funny|joke|roast|silly|wtf|bruh|hilarious|cute|wow|nice|omg|cool|fire|what|help|tell me|say something|seriously|please|interesting|\?)/i;
-  const mentionProfiles = getProfilesFromMessage(msg);
-
-  if (mentionProfiles.length > 0) return true;
-  if (messageMentionsBot(msg)) return true;
-  if (msg.from?.username && PRIMARY_USERNAMES.includes(msg.from.username.toLowerCase())) return true;
+  
+  if (getProfilesFromMessage(msg).length > 0) return true;
+  if (PRIMARY_USERNAMES.includes(msg.from?.username?.toLowerCase())) return true;
   if (activeKeywords.test(lower)) return true;
   if (text.length > 20 && Math.random() < RESPONSE_PROBABILITY) return true;
+
   return false;
 }
 
@@ -620,15 +656,38 @@ bot.on('message', async (msg) => {
   }
 });
 
+bot.onText(/\/activate(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  if (msg.chat.type === 'private') {
+    return bot.sendMessage(chatId, 'This command is only for groups.');
+  }
+
+  const code = match?.[1]?.trim();
+  if (!code) {
+    return bot.sendMessage(chatId, '⚠️ Usage: /activate <secretcode>');
+  }
+
+  if (code === ACTIVATE_CODE) {
+    activatedGroups[chatId] = true;
+    saveActivatedGroups();
+    return bot.sendMessage(chatId, '✅ Bot successfully activated for this group!');
+  } else {
+    return bot.sendMessage(chatId, '❌ Incorrect activation code.');
+  }
+});
+
 bot.onText(/\/start/, (msg) => {
+  if (!isChatActivated(msg)) return;
   bot.sendMessage(msg.chat.id, `🤖 Welcome to the Funny Bot!\n\n/joke - Get a random funny joke\n/fact - Get a random funny fact\n/mock @username - Mock someone playfully\n/help - Show menu\n/stats - Bot usage stats`);
 });
 
 bot.onText(/\/help/, (msg) => {
+  if (!isChatActivated(msg)) return;
   bot.sendMessage(msg.chat.id, `📋 Commands:\n/joke\n/fact\n/mock @user\n/start\n/help\n/register @user profileKey\n/profiles\n/setrole @user role (admin)\n/roles\n/chatty on|off (admin)\n/stats (admin)`);
 });
 
 bot.onText(/\/register (.+)/, (msg, match) => {
+  if (!isChatActivated(msg)) return;
   const parts = match[1].trim().split(/\s+/);
   if (parts.length < 2) return bot.sendMessage(msg.chat.id, 'Usage: /register @username profileKey');
   const username = parts[0].replace(/^@/, '').toLowerCase();
@@ -639,6 +698,7 @@ bot.onText(/\/register (.+)/, (msg, match) => {
 });
 
 bot.onText(/\/profiles/, (msg) => {
+  if (!isChatActivated(msg)) return;
   const entries = Object.entries(registeredProfiles).map(([u, k]) => `@${u} -> ${k}`);
   bot.sendMessage(msg.chat.id, entries.length ? `Registered profiles:\n${entries.join('\n')}` : 'No registered profiles.');
 });
@@ -653,6 +713,7 @@ async function isUserAdmin(chatId, userId) {
 }
 
 bot.onText(/\/setrole (.+)/, async (msg, match) => {
+  if (!isChatActivated(msg)) return;
   const chatId = msg.chat.id;
   if (!['group', 'supergroup'].includes(msg.chat.type)) return bot.sendMessage(chatId, 'This command only works in groups.');
   const isAdmin = await isUserAdmin(chatId, msg.from.id);
@@ -670,11 +731,13 @@ bot.onText(/\/setrole (.+)/, async (msg, match) => {
 });
 
 bot.onText(/\/roles/, (msg) => {
+  if (!isChatActivated(msg)) return;
   const entries = Object.entries(rolesMapping).map(([u, r]) => `@${u} -> ${r}`);
   bot.sendMessage(msg.chat.id, entries.length ? `Roles:\n${entries.join('\n')}` : 'No roles set.');
 });
 
 bot.onText(/\/chatty(?:\s+(on|off))?/, async (msg, match) => {
+  if (!isChatActivated(msg)) return;
   const chatId = msg.chat.id;
   if (!['group', 'supergroup'].includes(msg.chat.type)) return bot.sendMessage(chatId, 'This command only works in groups.');
   const isAdmin = await isUserAdmin(chatId, msg.from.id);
@@ -693,16 +756,19 @@ bot.onText(/\/chatty(?:\s+(on|off))?/, async (msg, match) => {
 });
 
 bot.onText(/\/joke/, (msg) => {
+  if (!isChatActivated(msg)) return;
   const joke = localJokes[Math.floor(Math.random() * localJokes.length)];
   bot.sendMessage(msg.chat.id, `😂 ${joke}`);
 });
 
 bot.onText(/\/fact/, (msg) => {
+  if (!isChatActivated(msg)) return;
   const fact = localFacts[Math.floor(Math.random() * localFacts.length)];
   bot.sendMessage(msg.chat.id, `🤓 ${fact}`);
 });
 
 bot.onText(/\/mock/, async (msg) => {
+  if (!isChatActivated(msg)) return;
   const input = msg.text.replace('/mock', '').trim();
   if (!input) return bot.sendMessage(msg.chat.id, '⚠️ Usage: /mock @username or /mock username');
   bot.sendMessage(msg.chat.id, `🎭 Crafting a roast for ${input}...`);
@@ -711,6 +777,7 @@ bot.onText(/\/mock/, async (msg) => {
 });
 
 bot.onText(/\/stats/, async (msg) => {
+  if (!isChatActivated(msg)) return;
   const chatId = msg.chat.id;
   const isPrivate = msg.chat.type === 'private';
   const isAdmin = isPrivate || await isUserAdmin(chatId, msg.from.id);
